@@ -2,36 +2,55 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import threading
-import time
 from typing import List, Tuple, Dict, Any
 from visual_memory import VisualMemory
+import time
 import json
 import os
+import time
+
+# ensure visual memory helper available
+from visual_memory import append_detection
 
 class ZoneFocusedDetector:
     """Object detector that only detects objects within defined zones"""
     
-    def __init__(self, model_path: str = "yolo11n.pt", confidence_threshold: float = 0.15):
+    def __init__(self, model_path: str = "yolo11n.pt", confidence_threshold: float = 0.15, zones_file: str = "zones.json"):
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
         self.visual_memory = VisualMemory()
         self.is_detecting = False
         self.detection_thread = None
-        self.zones_file = "zones.json"
+        self.zones_file = zones_file
+        self._zones_mtime = 0
         self.zones = []
+        self.load_zones_if_changed()
+        self.frame_width = 640
+        self.frame_skip = 2
+        self._frame_count = 0
+        self.label_map = {"mug": "cup", "water_bottle": "bottle"}  # add mappings as needed
         
-    def load_zones(self):
-        """Load custom zones from JSON file"""
-        if os.path.exists(self.zones_file):
-            try:
-                with open(self.zones_file, 'r') as f:
-                    self.zones = json.load(f)
-                print(f"📍 Loaded {len(self.zones)} zones for focused detection")
-                return True
-            except Exception as e:
-                print(f"❌ Error loading zones: {e}")
-                return False
-        return False
+    def load_zones_if_changed(self):
+        """Load custom zones from JSON file if it has changed"""
+        try:
+            if os.path.exists(self.zones_file):
+                m = os.path.getmtime(self.zones_file)
+                if m != self._zones_mtime:
+                    with open(self.zones_file, "r", encoding="utf-8") as f:
+                        self.zones = json.load(f)
+                    self._zones_mtime = m
+                    print(f"[zones reloaded] {len(self.zones)} zones")
+        except Exception as e:
+            print("Error reloading zones:", e)
+
+    def load_zones(self) -> bool:
+        """Backward-compatible wrapper used by callers expecting load_zones().
+
+        Returns True if zones are available after attempting a reload, False otherwise.
+        """
+        previous_count = len(self.zones)
+        self.load_zones_if_changed()
+        return len(self.zones) > 0
     
     def is_point_in_zone(self, point: Tuple[float, float], zone: Dict) -> bool:
         """Check if a point is within a zone"""
@@ -249,3 +268,61 @@ class ZoneFocusedDetector:
         }
         
         return summary
+    
+    def _log(self, msg: str):
+        print(f"[detector {time.strftime('%H:%M:%S')}] {msg}")
+
+    def _normalize_label(self, label: str) -> str:
+        return self.label_map.get(label.lower(), label.lower())
+
+    def _persist_detection(self, label: str, confidence: float, bbox: List[int], zone_name: str):
+        rec = {
+            "timestamp": time.time(),
+            "label": self._normalize_label(label),
+            "confidence": float(confidence),
+            "bbox": [int(x) for x in bbox],
+            "zone": zone_name
+        }
+        try:
+            append_detection(rec)
+            self._log(f"persisted: {rec['label']} conf={rec['confidence']:.2f} zone={zone_name}")
+        except Exception as e:
+            self._log(f"persist failed: {e}")
+
+    def detection_loop_once(self, frame) -> None:
+        # reduce CPU by skipping frames and resizing
+        self._frame_count += 1
+        if self._frame_count % self.frame_skip != 0:
+            return
+
+        # resize frame for faster inference
+        h, w = frame.shape[:2]
+        scale = self.frame_width / float(w)
+        resized = cv2.resize(frame, (self.frame_width, int(h * scale)))
+
+        # reload zones if changed
+        self.load_zones_if_changed()
+
+        # run your model on `resized` -> produce `detections` list
+        # expected detection format: {"label": str, "confidence": float, "bbox":[x,y,w,h]}
+        detections = self.run_model_on_frame(resized)  # implement this in your file
+
+        for det in detections:
+            label = det.get("label", "")
+            conf = float(det.get("confidence", 0.0))
+            bbox = det.get("bbox", [0,0,0,0])
+            # skip low confidence
+            if conf < self.conf_threshold:
+                continue
+
+            # map bbox back to original frame if needed
+            # if using resized, scale bbox up by 1/scale
+            if scale != 1.0:
+                bbox = [int(b / scale) for b in bbox]
+
+            # determine zone for bbox (implement _zone_for_bbox in your file)
+            zone_name = self._zone_for_bbox(bbox)
+            if zone_name:
+                # persist immediately
+                self._persist_detection(label, conf, bbox, zone_name)
+                # optional: notify or enqueue event for assistant

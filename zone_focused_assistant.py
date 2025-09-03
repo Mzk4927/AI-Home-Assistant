@@ -19,10 +19,12 @@ class ZoneFocusedAIHomeAssistant:
         self.is_running = False
         self.camera_thread = None
         self.zones_file = "zones.json"
+        self.current_camera_index = 0
         
     def start(self, camera_index: int = 0):
         """Start the home assistant system"""
         print("🤖 Starting Zone-Focused AI Home Assistant...")
+        self.current_camera_index = camera_index
         
         # Check if zones exist
         if not os.path.exists(self.zones_file):
@@ -69,14 +71,14 @@ class ZoneFocusedAIHomeAssistant:
     
     def ask_question(self, question: str) -> str:
         """Ask a question about object locations with zone-focused data"""
-        if not self.is_running:
-            return "Home assistant is not running. Please start it first."
-        
-        # Get recent detections for context (last 5 minutes)
+        # Get recent detections for context (last ~5 minutes)
         recent_detections = self.visual_memory.get_recent_detections(hours=0.08, limit=50)
+        # If nothing recent, fall back to a longer window so we can still answer
+        if not recent_detections:
+            recent_detections = self.visual_memory.get_recent_detections(hours=24, limit=200)
         
         if not recent_detections:
-            return "I haven't detected any objects recently in your defined zones. Make sure the camera is working and objects are visible in your zones."
+            return "I don't have any detections to reference yet. Ensure the camera is running and objects are visible in your zones."
         
         # Use Ollama to answer the question
         if self.ollama_client.is_available():
@@ -84,6 +86,14 @@ class ZoneFocusedAIHomeAssistant:
         else:
             # Fallback to simple text-based answers
             return self._simple_answer(question, recent_detections)
+
+    def pause_detection(self):
+        """Pause the detection loop (agent remains responsive)."""
+        self.object_detector.stop_detection()
+
+    def resume_detection(self):
+        """Resume detection using the last used camera index."""
+        self.object_detector.start_continuous_detection(self.current_camera_index, save_interval=1)
     
     def _simple_answer(self, question: str, detections: List[Dict]) -> str:
         """Simple fallback answer when Ollama is not available"""
@@ -176,6 +186,8 @@ def main():
         print("  - 'status' - Check system status")
         print("  - 'list' - List recent detections")
         print("  - 'zones' - Redefine custom zones")
+        print("  - 'pause' - Pause detection (agent stays active)")
+        print("  - 'resume' - Resume detection")
         print("  - 'quit' - Exit the assistant")
         print("="*60)
         
@@ -204,6 +216,12 @@ def main():
                         print("No recent detections found in your zones.")
                 elif user_input.lower() == 'zones':
                     assistant.redefine_zones()
+                elif user_input.lower() == 'pause':
+                    assistant.pause_detection()
+                    print("⏸️ Detection paused. You can still ask questions.")
+                elif user_input.lower() == 'resume':
+                    assistant.resume_detection()
+                    print("▶️ Detection resumed.")
                 elif user_input:
                     answer = assistant.ask_question(user_input)
                     print(f"🤖 Assistant: {answer}")

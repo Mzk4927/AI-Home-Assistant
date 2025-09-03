@@ -1,3 +1,36 @@
+import json
+import os
+import time
+from typing import Dict, Any, List
+
+MEMORY_FILE = "visual_memory.jsonl"
+
+def append_detection(detection: Dict[str, Any], filename: str = MEMORY_FILE):
+    """Append one detection as a JSON line (atomic flush)."""
+    os.makedirs(os.path.dirname(filename), exist_ok=True) if os.path.dirname(filename) else None
+    line = json.dumps(detection, default=str, ensure_ascii=False)
+    with open(filename, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+def load_recent(n: int = 50, since_ts: float = None, filename: str = MEMORY_FILE) -> List[Dict]:
+    """Load recent detections. If since_ts provided, return detections after that timestamp."""
+    if not os.path.exists(filename):
+        return []
+    results = []
+    with open(filename, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+                results.append(obj)
+            except Exception:
+                continue
+    # filter by timestamp if provided
+    if since_ts is not None:
+        results = [r for r in results if r.get("timestamp", 0) >= since_ts]
+    return results[-n:]
+
 import sqlite3
 import json
 import datetime

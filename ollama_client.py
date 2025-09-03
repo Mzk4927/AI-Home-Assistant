@@ -24,27 +24,29 @@ class OllamaClient:
         
         full_prompt = f"{context}\n\nUser: {prompt}\nAssistant:"
         
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model_name,
-                    "prompt": full_prompt,
-                    "stream": False
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result.get('response', 'No response generated')
-            else:
-                return f"Error: {response.status_code} - {response.text}"
-                
-        except requests.exceptions.Timeout:
-            return "Request timed out. Please try again."
-        except Exception as e:
-            return f"Error communicating with Ollama: {str(e)}"
+        # retry on timeout a couple of times with simple backoff
+        timeouts = [120, 120]
+        for attempt, timeout_s in enumerate(timeouts, start=1):
+            try:
+                response = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.model_name,
+                        "prompt": full_prompt,
+                        "stream": False
+                    },
+                    timeout=timeout_s
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    return result.get('response', 'No response generated')
+                else:
+                    return f"Error: {response.status_code} - {response.text}"
+            except requests.exceptions.Timeout:
+                if attempt == len(timeouts):
+                    return "Request timed out. Please try again."
+            except Exception as e:
+                return f"Error communicating with Ollama: {str(e)}"
     
     def answer_object_question(self, question: str, detection_data: List[Dict]) -> str:
         """Answer questions about object detections using context from visual memory"""
